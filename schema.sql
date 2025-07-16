@@ -1,12 +1,11 @@
 CREATE TABLE public.users (
 	user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-	name TEXT,
-	username TEXT UNIQUE,
+	name TEXT NOT NULL,
+	username TEXT UNIQUE NOT NULL,
 	sport TEXT,
 	follower_count INTEGER,
 	platforms TEXT
 );
-INSERT INTO users (name, username, sport, follower_count, platforms) VALUES('Air Bud', 'golden_receiver', 'Football', 200000, 'YouTube, TikTok');
 
 CREATE TABLE public.posts (
 	post_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
