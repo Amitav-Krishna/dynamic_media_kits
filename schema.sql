@@ -13,6 +13,7 @@ CREATE TABLE public.posts (
 	content TEXT NOT NULL,
 	view_count INTEGER,
 	user_id UUID NOT NULL,
+	created_at TIMESTAMPTZ DEFAULT NOW();
 	FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 
