@@ -1,7 +1,10 @@
 import { getInfluencerByUsername } from '@/lib/db/queries';
+import  Link from 'next/link';
 import FollowerGrowthGraph from '@/components/GrowthChart';
 import { Influencer } from '@/types/mediaKit';
 import EyeIcon from '@/components/EyeIcon'; // Make sure to import the EyeIcon
+import { CiHome } from "react-icons/ci";
+
 
 export default async function InfluencerPage({
   params,
@@ -21,6 +24,7 @@ export default async function InfluencerPage({
         </div>
       </div>
     );
+
   }
 
   const platformsArray = influencer.platforms 
@@ -45,6 +49,11 @@ export default async function InfluencerPage({
               <h1 className="text-3xl font-bold mb-2">{influencer.name}</h1>
               <p className="text-lg text-gray-300">@{username}</p>
               <p className="mt-4 text-gray-300">{influencer.sport}</p>
+            </div>
+            <div className="justify-end">
+                 <Link href="/">
+                       <CiHome />
+                 </ Link>
             </div>
           </div>
         </div>

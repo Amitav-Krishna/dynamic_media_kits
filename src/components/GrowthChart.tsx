@@ -48,7 +48,7 @@ export default function FollowerGrowthGraph({
     labels,
     datasets: [
       {
-        label: 'Follower Growth',
+        label: 'Followers',
         data: dataPoints,
         borderColor: 'rgb(99, 102, 241)',
         backgroundColor: 'rgba(99, 102, 241, 0.5)',
