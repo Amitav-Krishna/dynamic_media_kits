@@ -1,18 +1,83 @@
-import { getInfluencerByUsername } from '@/lib/db/queries';
-import  Link from 'next/link';
-import FollowerGrowthGraph from '@/components/GrowthChart';
-import { Influencer } from '@/types/mediaKit';
-import EyeIcon from '@/components/EyeIcon'; // Make sure to import the EyeIcon
+import { query } from "@/lib/db";
+import { ALLOWED_QUERIES } from "@/lib/db/queries";
+import Link from "next/link";
+import FollowerGrowthGraph from "@/components/GrowthChart";
+import { Influencer } from "@/types/mediaKit";
+import EyeIcon from "@/components/EyeIcon"; // Make sure to import the EyeIcon
 import { CiHome } from "react-icons/ci";
+import { getSession } from "@/lib/auth";
+import {
+  SECTION_COMPONENTS,
+  DEFAULT_LAYOUT,
+  type SectionKey,
+} from "@/components/ProfileSections";
 
+import ClaimButton from "./ClaimButton";
+import EditButton from "./EditButton";
+import RelevantPosts from "./RelevantPosts";
 
 export default async function InfluencerPage({
   params,
+  searchParams,
 }: {
-  params: { username: string }; // Removed Promise wrapper - Next.js provides resolved params
+  params: Promise<{ username: string }>; // Next.js 15 provides params as Promise
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
   const { username } = await params;
-  const influencer = await getInfluencerByUsername(username);
+  const { search: searchTerm } = await searchParams;
+  const agency = await getSession();
+  const result = await query(ALLOWED_QUERIES.GET_INFLUENCER_BY_USERNAME, [
+    username,
+  ]);
+  const influencer =
+    result.rows.length > 0
+      ? {
+          ...result.rows[0],
+          follower_growth_weekly: Math.floor(
+            (result.rows[0].follower_count || 0) * 0.02,
+          ),
+        }
+      : null;
+
+  // Parse grid layout or use default with bulletproof error handling
+  let gridLayout: SectionKey[][] = DEFAULT_LAYOUT;
+
+  if (influencer?.sidebar_layout) {
+    try {
+      const parsed = JSON.parse(influencer.sidebar_layout);
+
+      // Validate it's an array of arrays with valid section keys
+      if (
+        Array.isArray(parsed) &&
+        parsed.length > 0 &&
+        parsed.every(
+          (row) =>
+            Array.isArray(row) &&
+            row.length > 0 &&
+            row.every(
+              (key) => typeof key === "string" && key in SECTION_COMPONENTS,
+            ),
+        )
+      ) {
+        gridLayout = parsed;
+      } else {
+        console.warn(
+          "Invalid sidebar_layout structure, using default:",
+          parsed,
+        );
+        gridLayout = DEFAULT_LAYOUT;
+      }
+    } catch (error) {
+      console.error("Failed to parse sidebar_layout:", error);
+      gridLayout = DEFAULT_LAYOUT;
+    }
+  }
+
+  // Final safety check - ensure gridLayout is valid
+  if (!Array.isArray(gridLayout) || gridLayout.length === 0) {
+    console.error("GridLayout is invalid, forcing default:", gridLayout);
+    gridLayout = DEFAULT_LAYOUT;
+  }
 
   if (!influencer) {
     return (
@@ -24,115 +89,83 @@ export default async function InfluencerPage({
         </div>
       </div>
     );
-
   }
-
-  const platformsArray = influencer.platforms 
-    ? influencer.platforms.split(',').map(p => p.trim())
-    : [];
 
   return (
     <div className="min-h-screen bg-black text-white">
       {/* Header */}
       <div className="border-b border-gray-800">
-        <div className="max-w-5xl mx-auto px-4 py-8">
-          <div className="flex items-center justify-center gap-6">
+        <div className="max-w-5xl mx-auto px-4 py-2">
+          <div className="flex items-center justify-center gap-2">
             <div className="w-24 h-24 rounded-lg overflow-hidden border-2 border-gray-600 flex-shrink-0">
-              <img 
-                src="https://i0.wp.com/platypus.asn.au/wp-content/uploads/2019/07/scan-logo.apc1200.jpg?resize=340%2C129&ssl=1" 
-                alt="Profile"
-                className="w-full h-full object-cover"
-              />
+              {influencer.profile_image_url ? (
+                <img
+                  src={influencer.profile_image_url}
+                  alt={influencer.name}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <div className="w-full h-full bg-gray-700 flex items-center justify-center text-gray-300 text-2xl font-bold">
+                  {influencer.name.charAt(0).toUpperCase()}
+                </div>
+              )}
             </div>
-            
+
             <div className="text-center md:text-left">
               <h1 className="text-3xl font-bold mb-2">{influencer.name}</h1>
               <p className="text-lg text-gray-300">@{username}</p>
               <p className="mt-4 text-gray-300">{influencer.sport}</p>
             </div>
-            <div className="justify-end">
-                 <Link href="/">
-                       <CiHome />
-                 </ Link>
+            <div className="flex items-center gap-4">
+              {agency && !influencer.agency_id && (
+                <ClaimButton
+                  username={username}
+                  athleteName={influencer.name}
+                />
+              )}
+              {agency && influencer.agency_id === agency.agency_id && (
+                <EditButton username={username} athleteName={influencer.name} />
+              )}
+              {agency &&
+                influencer.agency_id &&
+                influencer.agency_id !== agency.agency_id && (
+                  <div className="px-4 py-2 bg-gray-700 text-gray-400 rounded-md cursor-not-allowed">
+                    Already Claimed
+                  </div>
+                )}
+              <Link href="/">
+                <CiHome className="text-white text-2xl" />
+              </Link>
             </div>
           </div>
         </div>
       </div>
 
-      <div className="max-w-5xl mx-auto px-4 py-8">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          {/* Stats */}
-          <div className="md:col-span-2 space-y-6">
-            <div className="border border-gray-800 p-6">
-              <h2 className="text-xl font-bold mb-4">Performance</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="border border-gray-800 p-4">
-                  <p className="text-sm text-gray-400">Total Followers</p>
-                  <p className="text-2xl font-bold">
-                    {(influencer.follower_count || 0).toLocaleString()}
-                  </p>
-                </div>
-                <div className="border border-gray-800 p-4">
-                  <p className="text-sm text-gray-400">Weekly Growth</p>
-                  <p className="text-2xl font-bold">
-                    {influencer.follower_growth_weekly.toLocaleString()}
-                  </p>
-                </div>
-                <div className="border border-gray-800 p-4">
-                  <p className="text-sm text-gray-400">Total Views</p>
-                  <p className="text-2xl font-bold">
-                    {Math.trunc(influencer.avg_views || 0).toLocaleString()}
-                  </p>
-                </div>
-                <div className="border border-gray-800 p-4">
-                  <p className="text-sm text-gray-400">Total Posts</p>
-                  <p className="text-2xl font-bold">
-                    {influencer.post_count}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {/* Top Posts */}
-            <div className="border border-gray-800 p-6">
-              <h2 className="text-xl font-bold mb-4">Top Posts</h2>
-              <div className="text-white">
-                {influencer.top_posts?.slice(0, 3).map((post: {title: string, views: number}, index) => (
-                  <div key={index} className="border border-gray-800 p-4 mb-2">
-                    <div className="flex justify-between items-center">
-                      <span className="font-medium">#{index + 1}: {post.title}</span>
-                      <div className="flex items-center gap-2 text-gray-400">
-                        <span>{post.views?.toLocaleString() || '0'} views</span>
-                        <EyeIcon className="h-4 w-4" />
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Sidebar */}
-          <div className="space-y-6">
-            {/* Platforms */}
-            <div className="border border-gray-800 p-6">
-              <h3 className="font-bold mb-4">Platforms</h3>
-              <ul className="space-y-2">
-                {platformsArray.map((platform) => (
-                  <li key={platform} className="text-gray-300">{platform}</li>
-                ))}
-              </ul>
-            </div>
-
-            <FollowerGrowthGraph 
-              currentFollowers={influencer.follower_count || 0} 
-              weeklyGrowth={influencer.follower_growth_weekly} 
+      <div className="max-w-7xl mx-auto px-4 py-2">
+        {searchTerm ? (
+          <div className="mb-6">
+            <RelevantPosts
+              userId={influencer.user_id}
+              searchTerm={searchTerm as string}
             />
-            
-            <div className="border border-gray-800 p-6">
-              <p>Hello! This is the place that the athlete's bio will go :^)</p>
-            </div>
           </div>
+        ) : null}
+
+        <div className="flex flex-row gap-2">
+          {gridLayout[0].map((_, colIndex) => (
+            <div key={colIndex} className="flex-1 flex flex-col gap-1">
+              {gridLayout.map((row, rowIndex) => {
+                const sectionKey = row[colIndex];
+                const SectionComponent =
+                  SECTION_COMPONENTS[sectionKey as SectionKey];
+                return SectionComponent ? (
+                  <div key={`${rowIndex}-${colIndex}`}>
+                    <SectionComponent influencer={influencer} />
+                  </div>
+                ) : null;
+              })}
+            </div>
+          ))}
         </div>
       </div>
     </div>

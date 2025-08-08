@@ -3,10 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
+    "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "init-pinecone": "npx tsx src/lib/vector_db/init_index.ts",
+    "sync-posts": "cd /home/amitav/codage/projets/dynamic_media_kits/main && npx tsx src/lib/vector_db/sync_posts.ts"
   },
   "pnpm": {
     "neverBuiltDependencies": []
@@ -14,11 +16,14 @@
   "dependencies": {
     "@ai-sdk/deepseek": "^0.2.16",
     "@pinecone-database/pinecone": "^6.1.2",
+    "@types/bcryptjs": "^3.0.0",
     "ai": "^4.3.19",
+    "bcryptjs": "^3.0.2",
     "canvas": "^3.1.2",
     "chart.js": "^4.5.0",
     "chartjs-node-canvas": "^5.0.0",
     "dotenv": "^17.2.1",
+    "eslint-plugin-react-hooks": "^5.2.0",
     "next": "15.3.5",
     "pg": "^8.16.3",
     "react": "^19.0.0",
@@ -32,6 +37,7 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@types/node": "^20",
+    "@types/pg": "^8.15.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "autoprefixer": "^10.4.17",

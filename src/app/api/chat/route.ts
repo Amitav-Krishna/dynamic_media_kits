@@ -1,21 +1,26 @@
 // app/api/chat/route.ts
-import getInfluencerData from '@/lib/get-influencer-data';
-import calculateEngagementRate from '@/lib/engagement-rate';
-import getInfluencerPosts from '@/lib/get-posts';
-import extractProductKeywords from '@/lib/extract-keywords';
-import findRelevantPosts from '@/lib/find-relevant-posts';
-import { NextRequest, NextResponse } from 'next/server';
-import { generateText } from 'ai';
-import analyzeSentiment from '@/lib/analyze-sentiment';
-import { deepseek } from '@ai-sdk/deepseek';
-import { query } from '@/lib/db';
-import { ALLOWED_QUERIES } from '@/lib/db/queries';
-import { ChartJSNodeCanvas } from 'chartjs-node-canvas'; // Import ChartJSNodeCanvas
-
+import getInfluencerData from "@/lib/get-influencer-data";
+import { VoyageAIClient } from "voyageai";
+import { Pinecone } from "@pinecone-database/pinecone";
+import calculateEngagementRate from "@/lib/engagement-rate";
+import getInfluencerPosts from "@/lib/get-posts";
+import { NextRequest, NextResponse } from "next/server";
+import { generateText } from "ai";
+import { deepseek } from "@ai-sdk/deepseek";
+import { query } from "@/lib/db";
+import vectorSearch from "@/lib/vector_db/query_vector_db";
+import analyzeSentiment from "@/lib/analyze-sentiment";
+import { ALLOWED_QUERIES } from "@/lib/db/queries";
+import {
+  ChartRenderer,
+  ChartData,
+  ChartDataset,
+  ChartOptions,
+} from "@/lib/chart-renderer";
 
 // Define types
 interface SentimentResult {
-  sentiment: 'positive' | 'neutral' | 'negative';
+  sentiment: "positive" | "neutral" | "negative";
   confidence: number;
   score: number;
 }
@@ -24,7 +29,9 @@ interface GraphData {
   title: string;
   labels: string[];
   values: number[];
-  type: 'bar'; // For now, only bar graphs
+  type: "bar" | "line" | "pie" | "doughnut" | "area" | "scatter";
+  datasets?: ChartDataset[];
+  options?: ChartOptions;
 }
 
 // Database Schema for SQL generation prompt
@@ -56,7 +63,17 @@ CREATE TABLE public.posts (
  * @returns True if the query is read-only, false otherwise.
  */
 function validateReadOnlySqlQuery(sqlQuery: string): boolean {
-  const forbiddenKeywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE'];
+  const forbiddenKeywords = [
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "DROP",
+    "CREATE",
+    "ALTER",
+    "TRUNCATE",
+    "GRANT",
+    "REVOKE",
+  ];
   const upperCaseQuery = sqlQuery.toUpperCase();
 
   for (const keyword of forbiddenKeywords) {
@@ -67,86 +84,129 @@ function validateReadOnlySqlQuery(sqlQuery: string): boolean {
   }
   // Basic check for SELECT statement to ensure it's a read operation
   // This is a simplified check; a more robust solution might use a SQL parser.
-  if (!upperCaseQuery.trim().startsWith('SELECT')) {
-    console.warn('Query does not start with SELECT, potentially not read-only.');
+  if (!upperCaseQuery.trim().startsWith("SELECT")) {
+    console.warn(
+      "Query does not start with SELECT, potentially not read-only.",
+    );
     return false;
   }
   return true;
 }
 
 /**
- * Generates a bar chart image using Chart.js and returns it as a base64 encoded string.
- * @param labels The labels for the x-axis.
- * @param values The values for the y-axis.
- * @param title The title of the chart.
+ * Generates a chart image using the enhanced chart renderer
+ * @param graphData The graph configuration data
  * @returns A promise that resolves to a base64 encoded string of the chart image.
  */
-async function generateBarChartImage(labels: string[], values: number[], title: string): Promise<string> {
-  const width = 800; // px
-  const height = 600; // px
-  const backgroundColour = '#ffffff'; // White background for the chart image
+async function generateChartImage(graphData: GraphData): Promise<string> {
+  const chartRenderer = new ChartRenderer({
+    width: 800,
+    height: 600,
+    theme: "light",
+    backgroundColor: "#ffffff",
+  });
 
-  const chartJSNodeCanvas = new ChartJSNodeCanvas({ width, height, backgroundColour });
-
-  const configuration = {
-    type: 'bar',
-    data: {
-      labels: labels,
-      datasets: [{
-        label: 'Value', // Generic label for the Y-axis data
-        data: values,
-        backgroundColor: '#4F46E5', // Tailwind indigo-600
-        borderRadius: 6, // Rounded corners for bars
-      }]
-    },
-    options: {
-      responsive: true,
-      plugins: {
-        title: {
-          display: true,
-          text: title,
-          font: {
-            size: 20,
-            weight: 'bold'
-          },
-          color: '#333'
-        },
-        legend: {
-          display: false // Hide legend for single dataset bar chart
-        }
+  const chartData: ChartData = {
+    type: graphData.type as any,
+    labels: graphData.labels,
+    datasets: graphData.datasets || [
+      {
+        label: "Value",
+        data: graphData.values,
+        backgroundColor:
+          graphData.type === "pie" || graphData.type === "doughnut"
+            ? [
+                "#4F46E5",
+                "#06B6D4",
+                "#10B981",
+                "#F59E0B",
+                "#EF4444",
+                "#8B5CF6",
+                "#6B7280",
+              ]
+            : "#4F46E5",
+        borderColor: "#4F46E5",
+        borderWidth: graphData.type === "line" ? 3 : 1,
+        fill: graphData.type === "area",
+        tension:
+          graphData.type === "line" || graphData.type === "area" ? 0.4 : 0,
       },
-      scales: {
-        x: {
-          grid: {
-            display: false
-          },
-          ticks: {
-            font: {
-              size: 12
-            },
-            color: '#333',
-            maxRotation: 45, // Rotate labels if they are long
-            minRotation: 0
-          }
-        },
-        y: {
-          beginAtZero: true,
-          ticks: {
-            font: {
-              size: 12
-            },
-            color: '#333',
-            callback: function(value: number) {
-              return value.toLocaleString(); // Format Y-axis labels
-            }
-          }
-        }
-      }
-    }
+    ],
+    options: {
+      title: graphData.title,
+      responsive: true,
+      animation: false,
+      ...graphData.options,
+    },
   };
 
-  const imageBuffer = await chartJSNodeCanvas.renderToBuffer(configuration);
-  return imageBuffer.toString('base64');
+  return await chartRenderer.renderChart(chartData);
+}
+
+/**
+ * Generates a text-based representation of chart data when visual charts aren't available
+ */
+function generateTextChart(graphData: GraphData): string {
+  let result = `📊 **${graphData.title || "Data Chart"}** (${graphData.type})\n\n`;
+
+  if (graphData.labels && graphData.values) {
+    const maxValue = Math.max(...graphData.values);
+    const barWidth = 20;
+
+    result += "```\n";
+    for (
+      let i = 0;
+      i < Math.min(graphData.labels.length, graphData.values.length);
+      i++
+    ) {
+      const label = graphData.labels[i];
+      const value = graphData.values[i];
+      const percentage = maxValue > 0 ? value / maxValue : 0;
+      const barLength = Math.round(percentage * barWidth);
+      const bar = "█".repeat(barLength) + "░".repeat(barWidth - barLength);
+
+      result += `${label.padEnd(15)} │${bar}│ ${value.toLocaleString()}\n`;
+    }
+    result += "```\n";
+  }
+
+  if (graphData.datasets && graphData.datasets.length > 1) {
+    result += "\n**Datasets:**\n";
+    graphData.datasets.forEach((dataset, index) => {
+      result += `• ${dataset.label}: ${dataset.data.length} data points\n`;
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Enhanced chart generation with multiple chart types and advanced options
+ */
+async function generateAdvancedChart(
+  type: "bar" | "line" | "pie" | "doughnut" | "area" | "scatter",
+  labels: string[],
+  datasets: ChartDataset[],
+  options: Partial<ChartOptions> = {},
+): Promise<string> {
+  const chartRenderer = new ChartRenderer({
+    width: options.width || 800,
+    height: options.height || 600,
+    theme: options.theme || "light",
+  });
+
+  const chartData: ChartData = {
+    type: type as any,
+    labels,
+    datasets,
+    options: {
+      responsive: true,
+      animation: false,
+      ...options,
+    },
+  };
+
+  return await chartRenderer.renderChart(chartData);
 }
 
 // 4. Main API Handler
@@ -156,21 +216,21 @@ export async function POST(request: NextRequest) {
     const { messages } = await request.json();
     if (!messages?.length) {
       return NextResponse.json(
-        { error: 'Messages array required' },
-        { status: 400 }
+        { error: "Messages array required" },
+        { status: 400 },
       );
     }
 
-    const lastMessage = messages[messages.length - 1]?.content || '';
+    const lastMessage = messages[messages.length - 1]?.content || "";
     const influencers = await getInfluencerData(); // Fetch all influencers once
 
-    let parsedIntent: any = { intent: 'other' }; // Default to 'other' intent
-    let aiGraphIntent: string = '';
+    let parsedIntent: any = { intent: "other" }; // Default to 'other' intent
+    let aiGraphIntent: string = "";
 
     try {
       // Use AI to determine if the user is asking for a graph and extract parameters
       const { text } = await generateText({
-        model: deepseek('deepseek-chat'),
+        model: deepseek("deepseek-chat"),
         prompt: `Based on the following user message, determine if the user is asking for a data visualization (like a graph or chart).
         If the user explicitly asks for a graph or chart, respond with a JSON object indicating "graph_request" intent and extract relevant details.
         If the user is NOT asking for a graph or chart, respond with a JSON object indicating "other" intent.
@@ -180,17 +240,23 @@ export async function POST(request: NextRequest) {
         JSON format for 'graph_request' intent:
         {
           "intent": "graph_request",
-          "graph_type": "bar", // Always "bar" for now
+          "graph_type": "bar" | "line" | "pie" | "doughnut" | "area" | "scatter",
           "entity_type": "sport" | "influencer" | "post" | "other", // e.g., "sport" for "performance of sports"
           "metric": "performance" | "engagement" | "sentiment" | "follower_count" | "other",
-
+          "comparison": "comparison" | "trend" | "distribution" | "correlation" | null,
+          "time_period": "weekly" | "monthly" | "all_time" | null,
           "group_by": "sport" | "username" | null,
           "filter": {
             "influencer": "username_if_specified" | null,
             "keyword": "keyword_if_specified" | null,
             "limit": "number_if_specified" | null // For top N requests
           },
-          "title_suggestion": "Suggested title for the graph"
+          "title_suggestion": "Suggested title for the graph",
+          "chart_options": {
+            "theme": "light" | "dark" | null,
+            "show_legend": boolean | null,
+            "show_grid": boolean | null
+          }
         }
 
         JSON format for 'other' intent:
@@ -199,14 +265,20 @@ export async function POST(request: NextRequest) {
         }
 
         Examples:
-        User: "Make me a graph of the performance of different sports"
-        AI: {"intent": "graph_request", "graph_type": "bar", "entity_type": "sport", "metric": "performance", "group_by": "sport", "filter": null, "title_suggestion": "Performance of Different Sports"}
+        User: "Make me a bar graph of the performance of different sports"
+        AI: {"intent": "graph_request", "graph_type": "bar", "entity_type": "sport", "metric": "performance", "comparison": "comparison", "group_by": "sport", "filter": null, "title_suggestion": "Performance of Different Sports", "chart_options": {"theme": "light", "show_legend": true, "show_grid": true}}
+
+        User: "Show me a line chart of follower growth trends"
+        AI: {"intent": "graph_request", "graph_type": "line", "entity_type": "influencer", "metric": "follower_count", "comparison": "trend", "time_period": "monthly", "title_suggestion": "Follower Growth Trends", "chart_options": {"theme": "light", "show_legend": true, "show_grid": true}}
+
+        User: "Create a pie chart showing the distribution of sports"
+        AI: {"intent": "graph_request", "graph_type": "pie", "entity_type": "sport", "metric": "performance", "comparison": "distribution", "title_suggestion": "Sports Distribution", "chart_options": {"theme": "light", "show_legend": true, "show_grid": false}}
 
         User: "Compare the performance of posts by @influencerA with 'running' as opposed to their median"
-        AI: {"intent": "graph_request", "graph_type": "bar", "entity_type": "post", "metric": "performance", "group_by": null, "filter": {"influencer": "influencerA", "keyword": "running"}, "title_suggestion": "Engagement of @influencerA's 'running' posts vs. Median"}
+        AI: {"intent": "graph_request", "graph_type": "bar", "entity_type": "post", "metric": "performance", "comparison": "comparison", "group_by": null, "filter": {"influencer": "influencerA", "keyword": "running"}, "title_suggestion": "Engagement of @influencerA's 'running' posts vs. Median", "chart_options": {"theme": "light", "show_legend": true, "show_grid": true}}
 
-        User: "Show me the top 5 influencers by follower count"
-        AI: {"intent": "graph_request", "graph_type": "bar", "entity_type": "influencer", "metric": "follower_count", "group_by": "influencer_username", "filter": {"limit": 5}, "title_suggestion": "Top 5 Influencers by Follower Count"}
+        User: "Show me the top 5 influencers by follower count as a doughnut chart"
+        AI: {"intent": "graph_request", "graph_type": "doughnut", "entity_type": "influencer", "metric": "follower_count", "comparison": "distribution", "group_by": "influencer_username", "filter": {"limit": 5}, "title_suggestion": "Top 5 Influencers by Follower Count", "chart_options": {"theme": "light", "show_legend": true, "show_grid": false}}
 
         User: "Who is the best influencer for dog food?"
         AI: {"intent": "other"}
@@ -215,28 +287,8 @@ export async function POST(request: NextRequest) {
         AI: `,
         maxTokens: 200,
         temperature: 0.0, // Keep temperature low for structured output
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: "object",
-          properties: {
-            intent: { type: "string" },
-            graph_type: { type: "string", enum: ["bar", "line", "pie"] }, // Expand as needed
-            entity_type: { type: "string", enum: ["sport", "influencer", "post", "other"] },
-            metric: { type: "string", enum: ["performance", "engagement", "sentiment", "follower_count", "other"] },
-            group_by: { type: ["string", "null"], enum: ["sport", "influencer_username", "post_type", null] },
-            filter: {
-              type: ["object", "null"],
-              properties: {
-                influencer: { type: ["string", "null"] },
-                keyword: { type: ["string", "null"] },
-                limit: { type: ["number", "null"] }
-              }
-            }
-            ,
-            title_suggestion: { type: "string" }
-          },
-          required: ["intent"]
-        }
+        // responseMimeType: "application/json", // Not supported in this version
+        // responseSchema: Not supported in this version
       });
       aiGraphIntent = text; // Assign the text response to aiGraphIntent
 
@@ -248,30 +300,53 @@ export async function POST(request: NextRequest) {
       // --- END NEW ---
 
       // Robust check before parsing JSON
-      if (aiGraphIntent && aiGraphIntent.trim().startsWith('{') && aiGraphIntent.trim().endsWith('}')) {
+      if (
+        aiGraphIntent &&
+        aiGraphIntent.trim().startsWith("{") &&
+        aiGraphIntent.trim().endsWith("}")
+      ) {
         parsedIntent = JSON.parse(aiGraphIntent);
         console.log("Parsed AI Intent:", parsedIntent);
       } else {
-        console.warn('AI graph intent response is not valid JSON format or empty, falling back. Raw response:', aiGraphIntent);
-        parsedIntent = { intent: 'other', reason: 'Invalid JSON format or empty response from AI' };
+        console.warn(
+          "AI graph intent response is not valid JSON format or empty, falling back. Raw response:",
+          aiGraphIntent,
+        );
+        parsedIntent = {
+          intent: "other",
+          reason: "Invalid JSON format or empty response from AI",
+        };
       }
-
     } catch (parseError) {
-      console.error('Error in AI graph intent generation or parsing:', parseError);
-      console.error('Raw AI response for graph intent (if available):', aiGraphIntent); // Log the raw response
+      console.error(
+        "Error in AI graph intent generation or parsing:",
+        parseError,
+      );
+      console.error(
+        "Raw AI response for graph intent (if available):",
+        aiGraphIntent,
+      ); // Log the raw response
       // Fallback to 'other' intent if parsing fails
-      parsedIntent = { intent: 'other', reason: 'AI generation or parsing failed' };
+      parsedIntent = {
+        intent: "other",
+        reason: "AI generation or parsing failed",
+      };
     }
 
     // --- Graph Request Handling (NEW Dynamic SQL Generation) ---
-    if (parsedIntent.intent === 'graph_request') {
+    if (parsedIntent.intent === "graph_request") {
       const queryPlan = parsedIntent;
-      let graphData: GraphData = { title: queryPlan.title_suggestion || "Generated Graph", labels: [], values: [], type: 'bar' };
+      let graphData: GraphData = {
+        title: queryPlan.title_suggestion || "Generated Graph",
+        labels: [],
+        values: [],
+        type: "bar",
+      };
 
       try {
         // --- NEW: Generate SQL using DeepSeek 2 ---
         const { text: generatedSql } = await generateText({
-          model: deepseek('deepseek-chat'), // Using DeepSeek for SQL generation
+          model: deepseek("deepseek-chat"), // Using DeepSeek for SQL generation
           prompt: `You are a SQL query generator. Based on the following database schema and user's request for graph data, generate a PostgreSQL SELECT query.
           The query must be read-only (no INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE, GRANT, REVOKE).
           The output should be ONLY the SQL query, no explanations or markdown fences.
@@ -282,8 +357,11 @@ export async function POST(request: NextRequest) {
           User's Graph Request Details:
           Entity Type: ${queryPlan.entity_type}
           Metric: ${queryPlan.metric}
-          ${queryPlan.filter ? `Filter: ${JSON.stringify(queryPlan.filter)}` : ''}
-          ${queryPlan.group_by ? `Group By: ${queryPlan.group_by}` : ''}
+          Chart Type: ${queryPlan.graph_type}
+          Comparison: ${queryPlan.comparison || "none"}
+          Time Period: ${queryPlan.time_period || "all_time"}
+          ${queryPlan.filter ? `Filter: ${JSON.stringify(queryPlan.filter)}` : ""}
+          ${queryPlan.group_by ? `Group By: ${queryPlan.group_by}` : ""}
 
           Generate SQL query for: "${lastMessage}"
           SQL:`,
@@ -295,253 +373,224 @@ export async function POST(request: NextRequest) {
 
         // --- NEW: Execute Dynamic SQL ---
         const data = await query(generatedSql);
+        console.log(data);
 
-        // Map dynamic data to graphData structure
-        if (data.length > 0) {
-            // General mapping logic based on common patterns for graph data
-            // This might need refinement based on the exact structure of dynamically generated query results
-            if (queryPlan.entity_type === 'sport' && queryPlan.metric === 'follower_count') {
-                // Assuming SQL returns columns like 'sport' and 'total_followers'
-                graphData.labels = data.map(d => d.sport);
-                graphData.values = data.map(d => parseInt(d.total_followers, 10)); // Ensure numeric
-            } else if (queryPlan.entity_type === 'influencer' && queryPlan.metric === 'follower_count') {
-                // Assuming SQL returns columns like 'username' and 'follower_count'
-                graphData.labels = data.map(d => `@${d.username}`);
-                graphData.values = data.map(d => parseInt(d.follower_count, 10));
-            } else if (queryPlan.entity_type === 'post' && queryPlan.metric === 'performance') {
-                // This case is more complex as it involves comparison, might need specific SQL output
-                // For simplicity, assume SQL returns 'label' and 'value' for comparison data
-                graphData.labels = data.map(d => d.label);
-                graphData.values = data.map(d => parseFloat(d.value));
+        // Enhanced data mapping with support for multiple datasets
+        if (data.rows && data.rows.length > 0) {
+          console.log(
+            "Mapping data for entity_type:",
+            queryPlan.entity_type,
+            "metric:",
+            queryPlan.metric,
+            "chart_type:",
+            queryPlan.graph_type,
+          );
+          console.log("Data structure:", Object.keys(data.rows[0]));
+
+          // Create datasets based on chart type and data structure
+          let datasets: ChartDataset[] = [];
+
+          if (
+            queryPlan.graph_type === "pie" ||
+            queryPlan.graph_type === "doughnut"
+          ) {
+            // For pie/doughnut charts, create a single dataset
+            graphData.labels = data.rows.map(
+              (d: any) => Object.values(d)[0] as string,
+            );
+            graphData.values = data.rows.map((d: any) =>
+              parseFloat(Object.values(d)[1] as string),
+            );
+
+            datasets = [
+              {
+                label: queryPlan.metric,
+                data: graphData.values,
+                backgroundColor: [
+                  "#4F46E5",
+                  "#06B6D4",
+                  "#10B981",
+                  "#F59E0B",
+                  "#EF4444",
+                  "#8B5CF6",
+                  "#6B7280",
+                  "#EC4899",
+                ],
+              },
+            ];
+          } else if (
+            queryPlan.comparison === "trend" &&
+            queryPlan.graph_type === "line"
+          ) {
+            // For trend analysis, create multiple datasets if multiple entities
+            const keys = Object.keys(data.rows[0]);
+            graphData.labels = data.rows.map((d: any) => d[keys[0]]);
+
+            // Check if we have multiple value columns (multiple series)
+            const valueColumns = keys.slice(1);
+            datasets = valueColumns.map((col, index) => ({
+              label: col.replace(/_/g, " ").toUpperCase(),
+              data: data.rows.map((d: any) => parseFloat(d[col])),
+              borderColor: ["#4F46E5", "#06B6D4", "#10B981", "#F59E0B"][
+                index % 4
+              ],
+              backgroundColor: [
+                "#4F46E520",
+                "#06B6D420",
+                "#10B98120",
+                "#F59E0B20",
+              ][index % 4],
+              fill: queryPlan.graph_type === "area",
+              tension: 0.4,
+            }));
+
+            graphData.values = data.rows.map((d: any) =>
+              parseFloat(d[keys[1]]),
+            );
+          } else {
+            // Default mapping for bar charts and other types
+            if (
+              queryPlan.entity_type === "sport" &&
+              queryPlan.metric === "follower_count"
+            ) {
+              graphData.labels = data.rows.map((d: any) => d.sport);
+              graphData.values = data.rows.map((d: any) =>
+                parseInt(d.follower_count, 10),
+              );
+            } else if (
+              queryPlan.entity_type === "influencer" &&
+              queryPlan.metric === "follower_count"
+            ) {
+              graphData.labels = data.rows.map((d: any) => `@${d.username}`);
+              graphData.values = data.rows.map((d: any) =>
+                parseInt(d.follower_count, 10),
+              );
             } else {
-                // Generic mapping if specific entity/metric not handled
-                // Attempt to find two columns, one for label, one for value
-                const keys = Object.keys(data[0]);
-                if (keys.length >= 2) {
-                    graphData.labels = data.map(d => d[keys[0]]);
-                    graphData.values = data.map(d => parseFloat(d[keys[1]]));
-                } else {
-                    throw new Error("Dynamic query results could not be mapped to graph data.");
-                }
+              // Generic mapping
+              const keys = Object.keys(data.rows[0]);
+              if (keys.length >= 2) {
+                graphData.labels = data.rows.map((d: any) => d[keys[0]]);
+                graphData.values = data.rows.map((d: any) =>
+                  parseFloat(d[keys[1]]),
+                );
+              } else {
+                throw new Error(
+                  "Dynamic query results could not be mapped to graph data.",
+                );
+              }
             }
-        }
 
-          if (graphData.labels.length === 0) {
-              return NextResponse.json({
-                  content: `I couldn't find data to generate a graph for your request. Please try a different query or ensure data exists.`,
-                  _metadata: { noData: true }
-              });
+            datasets = [
+              {
+                label: queryPlan.metric.replace(/_/g, " ").toUpperCase(),
+                data: graphData.values,
+                backgroundColor:
+                  queryPlan.graph_type === "bar" ? "#4F46E580" : "#4F46E520",
+                borderColor: "#4F46E5",
+                borderWidth: queryPlan.graph_type === "line" ? 3 : 1,
+                fill: queryPlan.graph_type === "area",
+                tension:
+                  queryPlan.graph_type === "line" ||
+                  queryPlan.graph_type === "area"
+                    ? 0.4
+                    : 0,
+              },
+            ];
           }
 
-          // Generate the chart image
-          const chartImageBase64 = await generateBarChartImage(graphData.labels, graphData.values, graphData.title);
+          graphData.datasets = datasets;
+          graphData.type = queryPlan.graph_type;
+          graphData.options = {
+            title: queryPlan.title_suggestion,
+            theme: queryPlan.chart_options?.theme || "light",
+            legend: {
+              display: queryPlan.chart_options?.show_legend ?? true,
+              position: "top",
+            },
+            grid: {
+              display: queryPlan.chart_options?.show_grid ?? true,
+            },
+            responsive: true,
+            animation: false,
+          };
+        }
+
+        if (graphData.labels.length === 0) {
+          console.log(graphData);
+          return NextResponse.json({
+            content: `I couldn't find data to generate a graph for your request. Please try a different query or ensure data exists.`,
+            _metadata: { noData: true },
+          });
+        }
+
+        // Generate the enhanced chart image with fallback handling
+        try {
+          const chartImageBase64 = await generateChartImage(graphData);
 
           return NextResponse.json({
-            content: `Here is the graph you requested:`,
+            content: `Here is the ${queryPlan.graph_type} chart you requested:`,
             _metadata: {
-              type: 'graph',
-              chartImage: chartImageBase64 // Send the base64 image
-            }
+              type: "graph",
+              chartImage: chartImageBase64,
+              chartType: queryPlan.graph_type,
+              title: queryPlan.title_suggestion,
+            },
           });
-      } catch (graphError: any) {
-          console.error("Error generating graph or processing data:", graphError);
+        } catch (chartError) {
+          console.error("Chart generation failed:", chartError);
+
+          // Return text-based chart data instead
+          const textChart = generateTextChart(graphData);
           return NextResponse.json({
-              content: `Sorry, I encountered an error while generating the graph: ${graphError.message}.`,
-              _metadata: { graphError: true, errorMessage: graphError.message }
+            content: `I couldn't generate a visual chart due to missing dependencies, but here's your data:\n\n${textChart}`,
+            _metadata: {
+              type: "text_chart",
+              chartType: queryPlan.graph_type,
+              title: queryPlan.title_suggestion,
+              chartError: true,
+            },
           });
+        }
+      } catch (graphError: any) {
+        console.error("Error generating graph or processing data:", graphError);
+        return NextResponse.json({
+          content: `Sorry, I encountered an error while generating the graph: ${graphError.message}. This might be due to missing chart rendering dependencies. Please try a different query or check the system configuration.`,
+          _metadata: { graphError: true, errorMessage: graphError.message },
+        });
       }
     }
     // --- End Graph Handling ---
+    if (parsedIntent.intent === "other") {
+      try {
+        const vc = new VoyageAIClient({ apiKey: process.env.VOYAGE_API_KEY! });
+        const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY! });
 
-    // Original keyword extraction and influencer matching logic (only runs if not a graph request)
-    const extractedKeywords = await extractProductKeywords(lastMessage);
-
-    if (extractedKeywords.length > 0) {
-      console.log("Extracted keywords:", extractedKeywords);
-
-      // Get all posts for each keyword
-      const keywordPosts: Record<string, any[]> = {};
-      for (const keyword of extractedKeywords) {
-        const posts = await findRelevantPosts(keyword);
-        if (posts.length > 0) {
-          console.log(`Found ${posts.length} posts for keyword: ${keyword}`);
-          keywordPosts[keyword] = posts;
-        }
-      }
-
-      if (Object.keys(keywordPosts).length > 0) {
-        // Find influencers and calculate intersection scores
-        const influencerScores: Record<string, {
-          influencer: any;
-          posts: any[];
-          matchedKeywords: string[];
-          intersectionScore: number;
-          positiveRatio: number;
-          avgEngagement: number;
-          bestPost: any;
-        }> = {};
-
-        // Process each keyword's posts
-        Object.entries(keywordPosts).forEach(([keyword, posts]) => {
-          posts.forEach(post => {
-            const username = post.username;
-
-            if (!influencerScores[username]) {
-              influencerScores[username] = {
-                influencer: post,
-                posts: [],
-                matchedKeywords: [],
-                intersectionScore: 0,
-                positiveRatio: 0,
-                avgEngagement: 0,
-                bestPost: post
-              };
-            }
-
-            // Add post and track which keywords this influencer matches
-            influencerScores[username].posts.push(post);
-            if (!influencerScores[username].matchedKeywords.includes(keyword)) {
-              influencerScores[username].matchedKeywords.push(keyword);
-            }
-          });
-        });
-
-        // Analyze the sentiment of the original query
-        const querysentiment = analyzeSentiment(lastMessage);
-        console.log(`Query sentiment: ${querysentiment.sentiment} (${querysentiment.score})`);
-
-        // Calculate final scores for each influencer
-        const scoredInfluencers = Object.values(influencerScores).map(data => {
-          const keywordIntersection = data.matchedKeywords.length;
-          const totalKeywords = extractedKeywords.length;
-          const intersectionRatio = keywordIntersection / totalKeywords;
-
-          // Check if any keywords are business-specific
-          const hasBusinessKeyword = data.matchedKeywords.some(keyword =>
-            lastMessage.toLowerCase().includes(`${keyword} ${keyword}`) ||
-            (lastMessage.toLowerCase().includes(`owner of`) && lastMessage.toLowerCase().includes(keyword))
-          );
-
-          // Calculate sentiment alignment scores for each post
-          let sentimentAlignmentScore = 0;
-          let positivePosts = 0;
-          
-          data.posts.forEach(post => {
-            // Analyze post sentiment if not already done
-            if (!post.sentiment) {
-              const postSentiment = analyzeSentiment(post.content);
-              post.sentiment = postSentiment.sentiment;
-              post.sentimentScore = postSentiment.score;
-              post.sentimentConfidence = postSentiment.confidence;
-            }
-
-            // Calculate alignment score based on sentiment matching
-            let alignmentMultiplier = 0;
-            
-            if (querysentiment.sentiment === post.sentiment) {
-              // Sentiments match - positive contribution
-              alignmentMultiplier = 1 + (post.sentimentConfidence || 0.5); // Boost for confident matches
-            } else if (querysentiment.sentiment === 'neutral' || post.sentiment === 'neutral') {
-              // One is neutral - small positive contribution
-              alignmentMultiplier = 0.3;
-            } else {
-              // Sentiments oppose - negative contribution
-              alignmentMultiplier = -1 - (post.sentimentConfidence || 0.5); // Penalty for confident mismatches
-            }
-
-            sentimentAlignmentScore += alignmentMultiplier * 15; // 15 points per post, scaled by alignment
-            
-            if (post.sentiment === 'positive') {
-              positivePosts++;
-            }
-          });
-
-          const positiveRatio = positivePosts / data.posts.length;
-          const avgEngagement = data.posts.reduce((sum, p) => sum + (p.engagementRate || 0), 0) / data.posts.length;
-
-          // Scoring formula - modified to include sentiment alignment
-          const intersectionScore = keywordIntersection * 50; // 50 points per matched keyword
-          const businessBonus = hasBusinessKeyword ? 20 : 0; // Bonus for business-relevant keywords
-          const engagementScore = Math.min(avgEngagement, 10); // Up to 10 points for engagement
-          
-          // Replace the old sentimentScore with our new alignment-based score
-          const totalScore = intersectionScore + businessBonus + sentimentAlignmentScore + engagementScore;
-
-          // Pick best post (prefer sentiment alignment first, then engagement)
-          const alignedPosts = data.posts.filter(p => 
-            querysentiment.sentiment === p.sentiment || 
-            querysentiment.sentiment === 'neutral' || 
-            p.sentiment === 'neutral'
-          );
-          
-          const bestPost = alignedPosts.length > 0
-            ? alignedPosts.sort((a, b) => (b.engagementRate || 0) - (a.engagementRate || 0))[0]
-            : data.posts.sort((a, b) => (b.engagementRate || 0) - (a.engagementRate || 0))[0];
-
-          return {
-            ...data,
-            intersectionRatio,
-            hasBusinessKeyword,
-            positiveRatio,
-            avgEngagement,
-            sentimentAlignmentScore,
-            totalScore,
-            bestPost,
-            queryAlignment: querysentiment.sentiment === bestPost.sentiment ? 'aligned' : 'misaligned'
-          };
-        });
-
-        // Sort by total score (intersection + business + sentiment alignment + engagement)
-        scoredInfluencers.sort((a, b) => b.totalScore - a.totalScore);
-        const bestInfluencer = scoredInfluencers[0];
-
-        console.log(`Top influencers by total score:`,
-          scoredInfluencers.slice(0, 3).map(inf =>
-            `@${inf.influencer.username}: ${inf.matchedKeywords.join('+')} (${inf.totalScore.toFixed(1)} pts, sentiment: ${inf.sentimentAlignmentScore.toFixed(1)})`
-          ));
-
-        // Create enhanced recommendation format with sentiment warning
-        const keywordCoverage = bestInfluencer.matchedKeywords.join(' + ');
-        const coveragePercent = Math.round(bestInfluencer.intersectionRatio * 100);
-
-        // Check if we need to add a sentiment mismatch warning
-        let sentimentWarning = '';
-        if (bestInfluencer.totalScore < 0 || bestInfluencer.sentimentAlignmentScore < -10) {
-          sentimentWarning = `⚠️ **SENTIMENT MISMATCH WARNING**: We've found somebody with similar keywords, but the sentiment is completely different, and as such may not fit well with your brand.\n\n`;
-        }
-
-        const enhancedRecommendation = `${sentimentWarning}🔥 Top Pick: @${bestInfluencer.influencer.username}
-📌 Key Post: "${bestInfluencer.bestPost.content.slice(0, 50)}${bestInfluencer.bestPost.content.length > 50 ? '...' : ''}"
-🎯 Keyword Match: ${keywordCoverage} (${coveragePercent}% coverage)
-🎭 Sentiment Alignment: ${bestInfluencer.queryAlignment === 'aligned' ? '✅ Aligned' : '❌ Misaligned'} (${bestInfluencer.sentimentAlignmentScore.toFixed(1)} pts)
-💵 ROI Justification: Covers ${bestInfluencer.matchedKeywords.length}/${extractedKeywords.length} brand keywords with ${bestInfluencer.influencer.follower_count?.toLocaleString()} followers
-${bestInfluencer.positiveRatio > 0.5 ? '✅ Positive sentiment' : bestInfluencer.avgEngagement > 2 ? '✅ High engagement' : '⚠️ Monitor performance'}`;
+        // Enhanced vector search with improved relevance
+        const searchResults = await vectorSearch(lastMessage, vc, pc);
 
         return NextResponse.json({
-          content: enhancedRecommendation,
+          content: searchResults,
           _metadata: {
-            type: 'intersection_match',
-            selectedInfluencer: bestInfluencer.influencer.username,
-            keywordCoverage: bestInfluencer.matchedKeywords,
-            intersectionScore: bestInfluencer.totalScore,
-            sentimentAlignment: bestInfluencer.sentimentAlignmentScore,
-            queryAlignment: bestInfluencer.queryAlignment,
-            allKeywords: extractedKeywords,
-            topInfluencers: scoredInfluencers.slice(0, 3).map(inf => ({
-              username: inf.influencer.username,
-              keywords: inf.matchedKeywords,
-              score: inf.totalScore,
-              sentimentScore: inf.sentimentAlignmentScore
-            }))
-          }
+            responseType: "enhanced_vector_search",
+            searchQuery: lastMessage,
+            timestamp: new Date().toISOString(),
+          },
+        });
+      } catch (error) {
+        console.error("Enhanced vector search error:", error);
+
+        // Fallback to AI-generated response if vector search fails
+        const fallbackResponse = `I encountered an issue searching for content related to "${lastMessage}". Let me try a different approach.\n\nBased on our available influencer data, I can help you find relevant creators. Try being more specific about:\n• The sport or activity you're interested in\n• The type of content you're looking for\n• Any specific brands or products mentioned\n\nFor example: "fitness influencers who post about protein supplements" or "soccer players reviewing cleats"`;
+
+        return NextResponse.json({
+          content: fallbackResponse,
+          _metadata: {
+            responseType: "vector_search_fallback",
+            originalQuery: lastMessage,
+            error: "Vector search unavailable",
+          },
         });
       }
-
-      // No posts found for any keyword
-      return NextResponse.json({
-        content: `No influencers mention any of these terms: ${extractedKeywords.join(', ')}. Try broader terms or different products.`,
-        _metadata: { noResults: true, searchedKeywords: extractedKeywords }
-      });
     }
 
     // AI-generated responses (default chatbot behavior if not a graph or keyword match)
@@ -564,10 +613,12 @@ ${bestInfluencer.positiveRatio > 0.5 ? '✅ Positive sentiment' : bestInfluencer
     💵 ROI Justification: [1 sentence]
     ⚠️ Caveats: [if any]`;
 
-    console.log("Platypus")
+    console.log("Platypus");
     const { text } = await generateText({
-      model: deepseek('deepseek-chat'),
-      system: SYSTEM_PROMPT + `\n\nAvailable influencers: ${JSON.stringify(influencers)}`,
+      model: deepseek("deepseek-chat"),
+      system:
+        SYSTEM_PROMPT +
+        `\n\nAvailable influencers: ${JSON.stringify(influencers)}`,
       messages,
       maxTokens: 600,
       temperature: 0.3,
@@ -577,39 +628,39 @@ ${bestInfluencer.positiveRatio > 0.5 ? '✅ Positive sentiment' : bestInfluencer
     const postsMatch = text.match(/\[CHECK_POSTS: (@\w+)\]/);
     if (postsMatch) {
       const username = postsMatch[1].substring(1);
-      const influencer = influencers.find(i => i.username === username);
+      const influencer = influencers.find((i) => i.username === username);
 
       if (!influencer) {
-        return NextResponse.json({ content: `@${username} not found in our system.` });
+        return NextResponse.json({
+          content: `@${username} not found in our system.`,
+        });
       }
 
       const posts = await getInfluencerPosts(influencer.user_id);
       return NextResponse.json({
         content: posts.length
-          ? posts.map(p => `📝 "${p.title}"\n${p.content.slice(0, 100)}...`).join('\n\n')
+          ? posts
+              .map((p) => `📝 "${p.title}"\n${p.content.slice(0, 100)}...`)
+              .join("\n\n")
           : `No posts found for @${username}`,
-        _metadata: { influencerId: influencer.user_id }
+        _metadata: { influencerId: influencer.user_id },
       });
     }
 
     // Default AI response
     return NextResponse.json({
       content: text,
-      _metadata: { responseType: 'generated' }
+      _metadata: { responseType: "generated" },
     });
-
   } catch (error) {
-    console.error('API Error:', error);
+    console.error("API Error:", error);
     return NextResponse.json(
-      { error: 'Internal server error', details: (error as Error).message }, // Ensure JSON response
-      { status: 500 }
+      { error: "Internal server error", details: (error as Error).message }, // Ensure JSON response
+      { status: 500 },
     );
   }
 }
 
 export async function GET() {
-  return NextResponse.json(
-    { error: 'Method not allowed' },
-    { status: 405 }
-  );
+  return NextResponse.json({ error: "Method not allowed" }, { status: 405 });
 }

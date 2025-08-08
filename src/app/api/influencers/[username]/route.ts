@@ -1,123 +1,138 @@
-import { getInfluencerByUsername } from '@/lib/db/queries';
-import { Influencer } from '@/types/mediaKit';
+import { NextRequest, NextResponse } from "next/server";
+import { query, writeQuery } from "@/lib/db";
+import { ALLOWED_QUERIES } from "@/lib/db/queries";
+import { getSession } from "@/lib/auth";
 
-export default async function InfluencerPage({
-  params,
-}: {
-  params: { username: string };
-}) {
-  const influencer = await getInfluencerByUsername(params.username);
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { username: string } },
+) {
+  try {
+    const { username } = await params;
 
-  if (!influencer) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-black">
-        <div className="p-8 text-center max-w-md text-white">
-          <h2 className="text-2xl font-bold mb-4">Error</h2>
-          <p>We couldn't find this influencer's profile</p>
-          <p className="text-sm mt-2">Please try again later</p>
-        </div>
-      </div>
+    const result = await query(ALLOWED_QUERIES.GET_INFLUENCER_BY_USERNAME, [
+      username,
+    ]);
+
+    if (result.rows.length === 0) {
+      return NextResponse.json(
+        { error: "Influencer not found" },
+        { status: 404 },
+      );
+    }
+
+    const influencer = {
+      ...result.rows[0],
+      follower_growth_weekly: Math.floor(
+        (result.rows[0].follower_count || 0) * 0.02,
+      ),
+    };
+
+    return NextResponse.json(influencer);
+  } catch (error) {
+    console.error("Error fetching influencer:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 },
     );
   }
+}
 
-  const platformsArray = influencer.platforms 
-    ? influencer.platforms.split(',').map(p => p.trim())
-    : [];
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: { username: string } },
+) {
+  try {
+    const agency = await getSession();
 
-  return (
-    <div className="min-h-screen bg-black text-white">
-      {/* Header */}
-      <div className="border-b border-gray-800">
-        <div className="max-w-5xl mx-auto px-4 py-8">
-          <div className="text-center">
-            <h1 className="text-3xl font-bold mb-2">{influencer.name}</h1>
-            <p className="text-lg text-gray-300">@{influencer.username}</p>
-            <p className="mt-4 text-gray-300">{influencer.sport}</p>
-          </div>
-        </div>
-      </div>
+    if (!agency) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 },
+      );
+    }
 
-      {/* Main Content */}
-      <div className="max-w-5xl mx-auto px-4 py-8">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          {/* Stats */}
-          <div className="md:col-span-2 space-y-6">
-            <div className="border border-gray-800 p-6">
-              <h2 className="text-xl font-bold mb-4">Performance</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="border border-gray-800 p-4">
-                  <p className="text-sm text-gray-400">Total Followers</p>
-                  <p className="text-2xl font-bold">
-                    {(influencer.follower_count || 0).toLocaleString()}
-                  </p>
-                </div>
-                <div className="border border-gray-800 p-4">
-                  <p className="text-sm text-gray-400">Weekly Growth</p>
-                  <p className="text-2xl font-bold">
-                    {influencer.follower_growth_weekly.toLocaleString()}
-                  </p>
-                </div>
-                <div className="border border-gray-800 p-4">
-                  <p className="text-sm text-gray-400">Total Views</p>
-                  <p className="text-2xl font-bold">
-                    {Math.trunc(influencer.avg_views || 0).toLocaleString()}
-                  </p>
-                </div>
-                <div className="border border-gray-800 p-4">
-                  <p className="text-sm text-gray-400">Total Posts</p>
-                  <p className="text-2xl font-bold">
-                    {influencer.post_count}
-                  </p>
-                </div>
-              </div>
-            </div>
+    const { username } = params;
+    const body = await request.json();
+    const { action } = body;
 
-            {/* Top Posts */}
-            <div className="border border-gray-800 p-6">
-              <h2 className="text-xl font-bold mb-4">Top Posts</h2>
-              <div className="text-white">
-                {influencer.top_posts?.slice(0, 3).map((post, index) => (
-                  <div key={index} className="border border-gray-800 p-4 mb-2">
-                    <p className="text-white">#{index + 1}: {post}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
+    if (action === "claim") {
+      // Check if influencer exists and is not already claimed
+      const influencerResult = await query(
+        "SELECT user_id, agency_id FROM users WHERE username = $1",
+        [username],
+      );
 
-          {/* Sidebar */}
-          <div className="space-y-6">
-            {/* Platforms */}
-            <div className="border border-gray-800 p-6">
-              <h3 className="font-bold mb-4">Platforms</h3>
-              <ul className="space-y-2">
-                {platformsArray.map((platform) => (
-                  <li key={platform} className="text-gray-300">{platform}</li>
-                ))}
-              </ul>
-            </div>
+      if (influencerResult.rows.length === 0) {
+        return NextResponse.json(
+          { error: "Influencer not found" },
+          { status: 404 },
+        );
+      }
 
-            {/* Quick Stats */}
-            <div className="border border-gray-800 p-6">
-              <h3 className="font-bold mb-4">Stats</h3>
-              <div className="space-y-3 text-gray-300">
-                <div className="flex justify-between">
-                  <span>Posts</span>
-                  <span>{influencer.post_count}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Platforms</span>
-                  <span>{platformsArray.length}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Avg. Views</span>
-                  <span>{Math.trunc(influencer.avg_views || 0).toLocaleString()}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+      const influencer = influencerResult.rows[0];
+
+      if (influencer.agency_id) {
+        return NextResponse.json(
+          { error: "Athlete is already claimed by an agency" },
+          { status: 409 },
+        );
+      }
+
+      // Claim the athlete
+      await writeQuery(
+        "UPDATE users SET agency_id = $1, updated_at = NOW() WHERE username = $2",
+        [agency.agency_id, username],
+      );
+
+      return NextResponse.json({
+        success: true,
+        message: "Athlete claimed successfully",
+      });
+    } else if (action === "update_profile") {
+      // Handle profile update (bio, image, and/or layout)
+      const { bio, profile_image_url, sidebar_layout } = body;
+
+      // Check if influencer exists and is owned by this agency
+      const influencerResult = await query(
+        "SELECT user_id, agency_id FROM users WHERE username = $1",
+        [username],
+      );
+
+      if (influencerResult.rows.length === 0) {
+        return NextResponse.json(
+          { error: "Influencer not found" },
+          { status: 404 },
+        );
+      }
+
+      const influencer = influencerResult.rows[0];
+
+      if (influencer.agency_id !== agency.agency_id) {
+        return NextResponse.json(
+          { error: "You don't have permission to edit this athlete" },
+          { status: 403 },
+        );
+      }
+
+      // Update the profile
+      await writeQuery(
+        "UPDATE users SET bio = $1, profile_image_url = $2, sidebar_layout = $3, updated_at = NOW() WHERE username = $4",
+        [bio, profile_image_url, sidebar_layout, username],
+      );
+
+      return NextResponse.json({
+        success: true,
+        message: "Profile updated successfully",
+      });
+    } else {
+      return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+    }
+  } catch (error) {
+    console.error("Error claiming influencer:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 },
+    );
+  }
 }
